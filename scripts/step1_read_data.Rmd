@@ -1,0 +1,465 @@
+---
+title: "Read datasets from CMI-PB website and perform data harmonization (Step1)"
+#format: html
+#editor: visual
+output:
+  BiocStyle::html_document:
+    toc: true
+    toc_float:
+        collapsed: true
+        smooth_scroll: true
+    toc_depth: 3
+    fig_caption: yes
+    code_folding: show
+    number_sections: false
+date: "2025-07-01"
+---
+
+```{r}
+base_dir = "/Users/jhou2/Documents/GitHub/PertussisVaccine_Prediction/"
+
+dir_raw_training <- paste0(base_dir, "data/raw_datasets/training_dataset/")
+dir_raw_challenge <- paste0(base_dir, "data/raw_datasets/challenge_dataset/")
+dir_RDS_output_objects <- paste0(base_dir, "data/output/")
+
+## `codebase.R` installs required packages and all house keeping functions
+source(paste0(base_dir, "code/codebase.R"))
+library(readr)
+library(dplyr)
+library(tidyr)
+```
+
+## Read subject and sample metadata
+```{r}
+## subject files
+d2020_subject <- read_tsv(paste0(dir_raw_training, "2020LD_subject.tsv"))
+d2020_subject$year_of_birth = parse_mdy_2digit_years(d2020_subject$year_of_birth)
+d2020_subject$date_of_boost = parse_mdy_2digit_years(d2020_subject$date_of_boost)
+
+d2021_subject <- read_tsv(paste0(dir_raw_training, "2021LD_subject.tsv"))
+
+d2022_subject <- read_tsv(paste0(dir_raw_training, "2022LD_subject.tsv"))
+
+d2023_subject <- read_tsv(paste0(dir_raw_challenge, "2023BD_subject.tsv")) %>%
+  dplyr::select("subject_id","infancy_vac","biological_sex","ethnicity","race","year_of_birth","date_of_boost","dataset"  )
+
+subject_training <-bind_rows(d2020_subject, d2021_subject, d2022_subject) %>%
+  dplyr::select("subject_id","infancy_vac","biological_sex","ethnicity","race","year_of_birth","date_of_boost","dataset"  )
+
+## specimen files
+d2020_specimen <- read_tsv(paste0(dir_raw_training, "2020LD_specimen.tsv"))
+
+d2021_specimen <- read_tsv(paste0(dir_raw_training, "2021LD_specimen.tsv"))
+
+d2022_specimen <- read_tsv(paste0(dir_raw_training, "2022LD_specimen.tsv"))
+
+d2023_specimen <- read_tsv(paste0(dir_raw_challenge, "2023BD_specimen.tsv"))
+
+specimen_training <- bind_rows(d2020_specimen, d2021_specimen,d2022_specimen)
+
+## create new object subject_specimen
+subject_specimen_training <- specimen_training %>%
+  left_join(subject_training) %>%
+  mutate(timepoint = planned_day_relative_to_boost)
+subject_specimen_training = process_subject_data(subject_specimen_training)
+
+subject_specimen_challenge <- d2023_specimen %>%
+  left_join(d2023_subject) %>%
+  mutate(timepoint = planned_day_relative_to_boost)
+subject_specimen_challenge = process_subject_data(subject_specimen_challenge)
+```
+
+## Read experimental data
+```{r}
+## plasma_antibody_levels files
+d2020_plasma_antibody_levels <- read_tsv(paste0(dir_raw_training, "2020LD_plasma_ab_titer.tsv")) %>%
+  mutate(isotype_antigen = paste0(isotype,"_", antigen))  %>%
+  dplyr::select(-antigen, -isotype)
+
+d2021_plasma_antibody_levels <- read_tsv(paste0(dir_raw_training, "2021LD_plasma_ab_titer.tsv")) %>%
+  mutate(isotype_antigen = paste0(isotype,"_", antigen))  %>%
+  dplyr::select(-antigen, -isotype)
+
+d2022_plasma_antibody_levels <- read_tsv(paste0(dir_raw_training, "2022LD_plasma_ab_titer.tsv")) %>%
+  mutate(isotype_antigen = paste0(isotype,"_", antigen))  %>%
+  dplyr::select(-antigen, -isotype)
+
+d2023_plasma_antibody_levels <- read_tsv(paste0(dir_raw_challenge, "2023BD_plasma_ab_titer.tsv")) %>%
+  mutate(isotype_antigen = paste0(isotype,"_", antigen))  %>%
+  dplyr::select(-antigen, -isotype)
+
+# get the shared ab name measured across years
+plasma_antibody_levels_common_features <- Reduce(intersect, 
+                                                 list(unique(d2020_plasma_antibody_levels$isotype_antigen), 
+                                                      unique(d2021_plasma_antibody_levels$isotype_antigen), 
+                                                      unique(d2022_plasma_antibody_levels$isotype_antigen),
+                                                      unique(d2023_plasma_antibody_levels$isotype_antigen)
+                                                      )
+                                                 ) 
+
+# filter out data and only keep those shared measurements
+# In the long format
+plasma_antibody_levels_long <- bind_rows(d2020_plasma_antibody_levels, d2021_plasma_antibody_levels, d2022_plasma_antibody_levels) %>%
+  filter(isotype_antigen %in% plasma_antibody_levels_common_features)
+
+# In the wide format
+plasma_antibody_levels_wide <- plasma_antibody_levels_long %>%
+  dplyr::select(specimen_id, isotype_antigen, MFI_normalised) %>%
+  pivot_wider(names_from = isotype_antigen, values_from = MFI_normalised)
+
+# here is challenge dataset, in long format
+d2023_plasma_antibody_levels_challenge =  d2023_plasma_antibody_levels %>%
+  filter(isotype_antigen %in% plasma_antibody_levels_common_features)
+# and wide format 
+plasma_antibody_levels_wide_challenge <- d2023_plasma_antibody_levels_challenge  %>%
+  dplyr::select(specimen_id, isotype_antigen, MFI_normalised) %>%
+  pivot_wider(names_from = isotype_antigen, values_from = MFI_normalised)
+
+```
+
+## plasma_cytokine_concentrations by Olink files
+
+```{r}
+# Define the data
+cytokine_uniprot_mapping <- data.frame(
+  cytokine = c("CCL8", "IL33", "CXCL12", "OLR1", "IL27", "IL2", "CXCL9", "TGFA", "IL1B", "IL6", "IL4", "TNFSF12",
+                "TSLP", "CCL11", "HGF", "FLT3LG", "IL17F", "IL7", "IL13", "IL18", "CCL13", "TNFSF10", "CXCL10",
+                "IFNG", "IL10", "CCL19", "TNF", "IL15", "CCL3", "CXCL8", "MMP12", "CSF2", "CSF3", "VEGFA", "IL17C",
+                "EGF", "CCL2", "IL17A", "OSM", "CSF1", "CCL4", "CXCL11", "LTA", "CCL7", "MMP1"),
+  protein_id = c("P80075", "O95760", "P48061", "P78380", "Q8NEV9_Q14213", "P60568", "Q07325", "P01135", "P01584",
+                 "P05231", "P05112", "O43508", "Q969D9", "P51671", "P14210", "P49771", "Q96PD4", "P13232", "P35225",
+                 "Q14116", "Q99616", "P50591", "P02778", "P01579", "P22301", "Q99731", "P01375", "P40933", "P10147",
+                 "P10145", "P39900", "P04141", "P09919", "P15692", "Q9P0M4", "P01133", "P13500", "Q16552", "P13725",
+                 "P09603", "P13236", "O14625", "P01374", "P80098", "P03956")
+)
+
+d2020_plasma_cytokine_concentrations_by_olink <- read_tsv(paste0(dir_raw_training, "2020LD_plasma_cytokine_concentration_by_olink.tsv"))
+
+d2021_plasma_cytokine_concentrations_by_olink <- read_tsv(paste0(dir_raw_training, "2021LD_plasma_cytokine_concentration_by_olink.tsv"))
+
+d2022_plasma_cytokine_concentrations_by_olink <- read_tsv(paste0(dir_raw_training, "2022LD_plasma_cytokine_concentration_by_olink.tsv"))
+
+## challenge data
+d2023_plasma_cytokine_concentrations_by_olink <- read_tsv(paste0(dir_raw_challenge, "2023BD_plasma_cytokine_concentration_by_olink.tsv"))
+ 
+## Process
+## All datasets have 30 overlapping cell types, whereas datasets 2021, 2022, and 2023 share 45 in common. Therefore, we selected the 45 common entries.
+# NOT include unique(d2020_plasma_cytokine_concentrations_by_olink$protein_id), 
+plasma_cytokine_concentrations_by_olink_common_features <- Reduce(intersect,
+                                                                  list(unique(d2021_plasma_cytokine_concentrations_by_olink$protein_id), 
+                                                                       unique(d2022_plasma_cytokine_concentrations_by_olink$protein_id),
+                                                                       unique(d2023_plasma_cytokine_concentrations_by_olink$protein_id)
+                                                                       )
+                                                                  ) 
+
+plasma_cytokine_concentrations_by_olink_long <-bind_rows(d2020_plasma_cytokine_concentrations_by_olink, d2021_plasma_cytokine_concentrations_by_olink, d2022_plasma_cytokine_concentrations_by_olink) %>%
+  filter(protein_id %in% plasma_cytokine_concentrations_by_olink_common_features)
+
+plasma_cytokine_concentrations_by_olink_wide <- plasma_cytokine_concentrations_by_olink_long %>%
+  dplyr::select(specimen_id, protein_id, concentration) %>%
+  pivot_wider(names_from = protein_id, values_from = concentration)
+
+plasma_cytokine_concentrations_by_olink_long_challenge <- d2023_plasma_cytokine_concentrations_by_olink  %>%
+  filter(protein_id %in% plasma_cytokine_concentrations_by_olink_common_features) 
+
+plasma_cytokine_concentrations_by_olink_wide_challenge = plasma_cytokine_concentrations_by_olink_long_challenge %>%
+  dplyr::select(specimen_id, protein_id, concentration) %>%
+  pivot_wider(names_from = protein_id, values_from = concentration)
+
+```
+
+## plasma_cytokine_concentrations by legendplex files
+
+```{r}
+d2021_plasma_cytokine_concentrations_by_legendplex <- read_tsv(paste0(dir_raw_training, "2021LD_plasma_cytokine_concentration_by_legendplex.tsv"))
+
+d2022_plasma_cytokine_concentrations_by_legendplex <- read_tsv(paste0(dir_raw_training, "2022LD_plasma_cytokine_concentration_by_legendplex.tsv"))
+
+d2023_plasma_cytokine_concentrations_by_legendplex <- read_tsv(paste0(dir_raw_challenge, "2023BD_plasma_cytokine_concentration_by_legendplex.tsv"))
+
+plasma_cytokine_concentrations_by_legendplex_common_features <- Reduce(intersect,
+                                                        list(unique(d2021_plasma_cytokine_concentrations_by_legendplex$protein_id), 
+                                                              unique(d2022_plasma_cytokine_concentrations_by_legendplex$protein_id),
+                                                              unique(d2023_plasma_cytokine_concentrations_by_legendplex$protein_id)
+                                                              )
+                                                        ) 
+
+plasma_cytokine_concentrations_by_legendplex_long <-bind_rows(d2021_plasma_cytokine_concentrations_by_legendplex, d2022_plasma_cytokine_concentrations_by_legendplex) %>%
+  filter(protein_id %in% plasma_cytokine_concentrations_by_legendplex_common_features)
+
+plasma_cytokine_concentrations_by_legendplex_wide <- plasma_cytokine_concentrations_by_legendplex_long %>%
+  dplyr::select(specimen_id, protein_id, concentration) %>%
+  pivot_wider(names_from = protein_id, values_from = concentration)
+
+plasma_cytokine_concentrations_by_legendplex_long_challenge <- d2023_plasma_cytokine_concentrations_by_legendplex  %>%
+  filter(protein_id %in% plasma_cytokine_concentrations_by_legendplex_common_features) 
+  
+plasma_cytokine_concentrations_by_legendplex_wide_challenge = plasma_cytokine_concentrations_by_legendplex_long_challenge %>%
+  dplyr::select(specimen_id, protein_id, concentration) %>%
+  pivot_wider(names_from = protein_id, values_from = concentration)
+```
+
+## pbmc_cell_frequency files
+
+```{r}
+d2020_pbmc_cell_frequency <- read_tsv(paste0(dir_raw_training, "2020LD_pbmc_cell_frequency.tsv"))
+
+d2021_pbmc_cell_frequency <- read_tsv(paste0(dir_raw_training, "2021LD_pbmc_cell_frequency.tsv"))
+
+d2022_pbmc_cell_frequency <- read_tsv(paste0(dir_raw_training, "2022LD_pbmc_cell_frequency.tsv"))
+
+d2023_pbmc_cell_frequency <- read_tsv(paste0(dir_raw_challenge, "2023BD_pbmc_cell_frequency.tsv"))
+
+## All datasets have 20 overlapping cell types, whereas datasets 21, 22, and 23 share 39 in common. Therefore, we selected the 39 common entries.
+# NOT include unique(d2020_pbmc_cell_frequency$cell_type_name),
+pbmc_cell_frequency_common_features <- Reduce(intersect,
+                                              list(unique(d2021_pbmc_cell_frequency$cell_type_name),
+                                                   unique(d2022_pbmc_cell_frequency$cell_type_name),
+                                                   unique(d2023_pbmc_cell_frequency$cell_type_name)
+                                                   )
+                                              ) 
+
+pbmc_cell_frequency_long <-bind_rows(d2020_pbmc_cell_frequency, d2021_pbmc_cell_frequency, d2022_pbmc_cell_frequency) %>%
+  filter(cell_type_name %in% pbmc_cell_frequency_common_features)
+
+pbmc_cell_frequency_wide <- pbmc_cell_frequency_long %>%
+  pivot_wider(names_from = cell_type_name, values_from = percent_live_cell)
+
+pbmc_cell_frequency_long_challenge <- d2023_pbmc_cell_frequency %>%
+  filter(cell_type_name %in% pbmc_cell_frequency_common_features) 
+
+pbmc_cell_frequency_wide_challenge = pbmc_cell_frequency_long_challenge %>%
+  pivot_wider(names_from = cell_type_name, values_from = percent_live_cell)
+
+```
+
+## pbmc_gene_expression
+
+```{r}
+d2020_pbmc_gene_expression <- read_tsv(paste0(dir_raw_training, "2020LD_pbmc_gene_expression.tsv"))
+
+d2021_pbmc_gene_expression <- read_tsv(paste0(dir_raw_training, "2021LD_pbmc_gene_expression.tsv"))
+
+d2022_pbmc_gene_expression <- read_tsv(paste0(dir_raw_training, "2022LD_pbmc_gene_expression.tsv"))
+
+d2023_pbmc_gene_expression <- read_tsv(paste0(dir_raw_challenge, "2023BD_pbmc_gene_expression.tsv"))
+
+pbmc_gene_expression_common_features <- Reduce(intersect, 
+                                               list(unique(d2020_pbmc_gene_expression$versioned_ensembl_gene_id),
+                                                    unique(d2021_pbmc_gene_expression$versioned_ensembl_gene_id),
+                                                    unique(d2022_pbmc_gene_expression$versioned_ensembl_gene_id)
+                                                    )
+                                               ) 
+
+pbmc_gene_expression_long <-bind_rows(d2020_pbmc_gene_expression, d2021_pbmc_gene_expression, d2022_pbmc_gene_expression) %>%
+  filter(versioned_ensembl_gene_id %in% pbmc_gene_expression_common_features)
+
+pbmc_gene_expression_wide_raw_count <- pbmc_gene_expression_long %>%
+  dplyr::select(specimen_id, versioned_ensembl_gene_id, raw_count) %>%
+  pivot_wider(names_from = versioned_ensembl_gene_id, values_from = raw_count)
+
+pbmc_gene_expression_wide_tpm <- pbmc_gene_expression_long %>%
+  dplyr::select(specimen_id, versioned_ensembl_gene_id, tpm) %>%
+  pivot_wider(names_from = versioned_ensembl_gene_id, values_from = tpm)
+
+pbmc_gene_expression_wide_challenge_raw_count <- d2023_pbmc_gene_expression %>%
+  dplyr::select(specimen_id, versioned_ensembl_gene_id, raw_count) %>%
+  pivot_wider(names_from = versioned_ensembl_gene_id, values_from = raw_count)
+
+pbmc_gene_expression_wide_challenge_tpm <- d2023_pbmc_gene_expression %>%
+  dplyr::select(specimen_id, versioned_ensembl_gene_id, tpm) %>%
+  pivot_wider(names_from = versioned_ensembl_gene_id, values_from = tpm)
+
+```
+
+## t_cell_activation (Aim assay)
+```{r}
+d2021_t_cell_activation <- read_tsv(paste0(dir_raw_training, "2021LD_t_cell_activation.tsv")) 
+
+d2022_t_cell_activation <- read_tsv(paste0(dir_raw_training, "2022LD_t_cell_activation.tsv")) 
+
+d2023_t_cell_activation <- read_tsv(paste0(dir_raw_challenge, "2023BD_t_cell_activation.tsv"))
+
+t_cell_activation_common_features <- Reduce(intersect, 
+                                            list(unique(d2021_t_cell_activation$stimulation), 
+                                                 unique(d2022_t_cell_activation$stimulation), 
+                                                 unique(d2023_t_cell_activation$stimulation)
+                                                 )
+                                            ) 
+
+t_cell_activation_long_training <-bind_rows(d2021_t_cell_activation, d2022_t_cell_activation) %>%
+  filter(stimulation %in% t_cell_activation_common_features) 
+
+t_cell_activation_long_challenge <- d2023_t_cell_activation %>%
+  filter(stimulation %in% t_cell_activation_common_features) 
+
+t_cell_activation_wide_training <- t_cell_activation_long_training %>%
+  dplyr::select(specimen_id, stimulation, analyte_percentages) %>%
+  pivot_wider(names_from = stimulation, values_from = analyte_percentages)
+
+t_cell_activation_wide_challenge <- t_cell_activation_long_challenge %>%
+  dplyr::select(specimen_id, stimulation, analyte_percentages) %>%
+  pivot_wider(names_from = stimulation, values_from = analyte_percentages)
+
+```
+
+## t_cell_polarization (flurospot)
+```{r}
+d2021_t_cell_polarization <- read_tsv(paste0(dir_raw_training, "2021LD_t_cell_polarization.tsv")) %>%
+  mutate(stimulation_protein_id = paste0(stimulation, "_", protein_id))
+  
+d2022_t_cell_polarization <- read_tsv(paste0(dir_raw_training, "2022LD_t_cell_polarization.tsv")) %>%
+  mutate(stimulation_protein_id = paste0(stimulation, "_", protein_id))
+
+d2023_t_cell_polarization <- read_tsv(paste0(dir_raw_challenge, "2023BD_t_cell_polarization.tsv"))  %>%
+  mutate(stimulation_protein_id = paste0(stimulation, "_", protein_id))
+
+t_cell_polarization_common_features <- Reduce(intersect,
+                                              list(unique(d2021_t_cell_polarization$stimulation_protein_id),
+                                                   unique(d2022_t_cell_polarization$stimulation_protein_id), 
+                                                   unique(d2023_t_cell_polarization$stimulation_protein_id)
+                                                   )
+                                              ) 
+
+t_cell_polarization_long_training <-bind_rows(d2021_t_cell_polarization, d2022_t_cell_polarization) %>%
+  filter(stimulation_protein_id %in% t_cell_polarization_common_features) 
+
+t_cell_polarization_long_challenge <- d2023_t_cell_polarization %>%
+  filter(stimulation_protein_id %in% t_cell_polarization_common_features) 
+
+t_cell_polarization_wide_training <- t_cell_polarization_long_training %>%
+  dplyr::select(specimen_id, stimulation_protein_id, analyte_counts) %>%
+  pivot_wider(names_from = stimulation_protein_id, values_from = analyte_counts)
+
+t_cell_polarization_wide_challenge <- t_cell_polarization_long_challenge %>%
+  dplyr::select(specimen_id, stimulation_protein_id, analyte_counts) %>%
+  pivot_wider(names_from = stimulation_protein_id, values_from = analyte_counts)
+```
+
+
+## Create Dataframes: Df of training data
+```{r}
+master_database_training_data <- list(
+  
+  subject_specimen = subject_specimen_training %>%
+    filter(timepoint <= 40),
+  
+  plasma_antibody_levels = list(
+    wide = plasma_antibody_levels_wide,
+    long = plasma_antibody_levels_long
+    ),
+  
+  plasma_cytokine_concentrations_by_olink = list(
+    wide = plasma_cytokine_concentrations_by_olink_wide,
+    long = plasma_cytokine_concentrations_by_olink_long
+    ),
+  
+  plasma_cytokine_concentrations_by_legendplex = list(
+    wide = plasma_cytokine_concentrations_by_legendplex_wide,
+    long = plasma_cytokine_concentrations_by_legendplex_long
+    ),
+  
+  pbmc_cell_frequency = list(
+    wide = pbmc_cell_frequency_wide,
+    long = pbmc_cell_frequency_long
+    ), 
+  
+  pbmc_gene_expression= list(
+    wide_raw_count = pbmc_gene_expression_wide_raw_count,
+    wide_tpm = pbmc_gene_expression_wide_tpm,
+    long = pbmc_gene_expression_long
+    ),
+  
+  t_cell_polarization = list(
+    wide = t_cell_polarization_wide_training,
+    long = t_cell_polarization_long_training
+    ),
+  
+   t_cell_activation = list(
+    wide = t_cell_activation_wide_training,
+    long = t_cell_activation_long_training
+    )
+)
+
+
+#sapply(master_database_training_data$subject_specimen, dim)
+sapply(master_database_training_data$plasma_antibody_levels, dim)
+sapply(master_database_training_data$plasma_cytokine_concentrations_by_olink, dim)
+sapply(master_database_training_data$plasma_cytokine_concentrations_by_legendplex, dim)
+sapply(master_database_training_data$pbmc_cell_frequency, dim)
+sapply(master_database_training_data$pbmc_gene_expression, dim)
+sapply(master_database_training_data$t_cell_polarization, dim)
+sapply(master_database_training_data$t_cell_activation, dim)
+```
+## Create Dataframes: Df of challenge data
+```{r}
+master_database_data_challenge <- list(
+  
+  subject_specimen = subject_specimen_challenge %>%
+    filter(timepoint <= 0) %>%
+    filter(timepoint >= -40),
+  
+  plasma_antibody_levels = list(
+    wide = plasma_antibody_levels_wide_challenge,
+    long = d2023_plasma_antibody_levels_challenge
+    ),
+  
+  plasma_cytokine_concentrations_by_olink = list(
+    wide = plasma_cytokine_concentrations_by_olink_wide_challenge,
+    long = plasma_cytokine_concentrations_by_olink_long_challenge
+    ),
+  
+  plasma_cytokine_concentrations_by_legendplex = list(
+    wide = plasma_cytokine_concentrations_by_legendplex_wide_challenge,
+    long = plasma_cytokine_concentrations_by_legendplex_long_challenge
+    ),
+  
+  pbmc_cell_frequency = list(
+    wide = pbmc_cell_frequency_wide_challenge,
+    long = pbmc_cell_frequency_long_challenge
+    ),
+  
+  pbmc_gene_expression= list(
+    wide_raw_count = pbmc_gene_expression_wide_challenge_raw_count,
+    wide_tpm = pbmc_gene_expression_wide_challenge_tpm,
+    long = d2023_pbmc_gene_expression
+    ),
+  
+  t_cell_polarization = list(
+    wide = t_cell_polarization_wide_challenge, 
+    long = t_cell_polarization_long_challenge
+    ),
+  
+   t_cell_activation = list(
+    wide = t_cell_activation_wide_challenge, 
+    long = t_cell_activation_long_challenge
+    )
+)
+```
+
+## Create Dataframes: Df of training + Challenge data
+```{r}
+master_database_data =  list(
+  training = master_database_training_data,
+  challenge = master_database_data_challenge
+)
+```
+
+## Save data as RDS File
+
+```{r}
+saveRDS(master_database_data, file = paste0(dir_RDS_output_objects, "master_harmonized_data_v20240825.RDS"))
+```
+
+```{r}
+
+# Recursive function to save data frames (and lists)
+#dir_rds_objects = dir_RDS_objects
+#save_dataframes_to_tsv(master_database_data)
+```
+
+## session_info()
+
+```{r}
+# session_info()
+```

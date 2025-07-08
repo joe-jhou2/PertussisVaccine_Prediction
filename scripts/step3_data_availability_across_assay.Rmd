@@ -1,0 +1,346 @@
+---
+title: "Data Description"
+output: html_document
+date: ""
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(ggrepel)
+library(ggpubr)
+library(tidyverse)
+library(dplyr)
+library(reshape2)
+library(RColorBrewer)
+library(patchwork)
+library(ggh4x)
+library(rstatix)
+library(ggdist)
+library(tibble)
+library(kableExtra)
+library(cowplot)
+library(ComplexHeatmap)
+library(circlize)
+# library(impute)
+# library(mice)
+```
+
+<div style="font-size:20px;">
+  We first prepare the subject and specimen data and follow by examining the basic data including age, ethnicity, gender et.al across 4 year data sets.
+</div>
+
+```{r}
+base_dir = "/Users/jhou2/Documents/GitHub/PertussisVaccine_Prediction/"
+
+dir_raw_training <- paste0(base_dir, "data/raw_training_dataset/")
+dir_raw_prediction <- paste0(base_dir, "data/raw_challenge_dataset/")
+dir_RDS_objects <- paste0(base_dir, "data/output/")
+
+master_processed_data = readRDS(file = paste0(dir_RDS_objects, "master_processed_data_v20240825.RDS"))
+```
+
+# <span style="font-size:24px;"> Demographic Data Viz </span>
+```{r,fig.width=10, fig.height=4, warning=FALSE, message=FALSE}
+#-----------------------------------------------------------------------------------------#
+# explore subject demographic info
+#-----------------------------------------------------------------------------------------#
+# plot by age
+theme_age = theme(panel.border = element_rect(colour = "black", fill = NA, size = 1), 
+                  panel.grid.major = element_blank(),
+                  panel.grid.minor = element_blank(),
+                  panel.background = element_blank(),
+                  strip.text = element_text(size = 18),
+                  axis.text.y = element_text(size = 18, colour = "black"), 
+                  axis.text.x = element_text(size = 18, angle = 0, hjust = 0.5, vjust = 1, colour = "black"),
+                  axis.title.y = element_text(size = 20),
+                  legend.text = element_text(size = 18))
+
+ggplot(master_processed_data$subject_specimen, aes(x = infancy_vac, y = age)) + 
+  geom_jitter(aes(color = biological_sex, fill = biological_sex, shape = race), width = 0.2, alpha = 1.0, size = 3) +
+  geom_boxplot(position = position_nudge(x = 0), width = 0.3, alpha = 0.2, outlier.colour = NA, outlier.alpha = 1) +
+  scale_fill_manual(name = "Sex", values = c("Female" = "red", "Male" = "blue")) +
+  scale_color_manual(name = "Sex", values = c("Female" = "red", "Male" = "blue")) +
+  scale_shape_manual(name = "Race", values = c(15, 16, 17, 18, 19, 8, 9)) + 
+  labs(x = NULL, y = "Age (yrs) at boost") +
+  theme_age
+
+```
+
+```{r,fig.width=15, fig.height=4, warning=FALSE, message=FALSE}
+#-----------------------------------------------------------------------------------------#
+# explore subject demographic info
+#-----------------------------------------------------------------------------------------#
+# plot by age
+theme_age = theme(panel.border = element_rect(colour = "black", fill = NA, size = 1), 
+                  panel.grid.major = element_blank(),
+                  panel.grid.minor = element_blank(),
+                  panel.background = element_blank(),
+                  strip.text = element_text(size = 18),
+                  axis.text.y = element_text(size = 18, colour = "black"), 
+                  axis.text.x = element_text(size = 18, angle = 0, hjust = 0.5, vjust = 1, colour = "black"),
+                  axis.title.y = element_text(size = 20),
+                  legend.text = element_text(size = 18))
+
+ggplot(master_processed_data$subject_specimen, aes(x = infancy_vac, y = age)) + 
+  geom_jitter(aes(color = biological_sex, fill = biological_sex, shape = race), width = 0.2, alpha = 1.0, size = 3) +
+  geom_boxplot(position = position_nudge(x = 0), width = 0.3, alpha = 0.2, outlier.colour = NA, outlier.alpha = 1) +
+  scale_fill_manual(name = "Sex", values = c("Female" = "red", "Male" = "blue")) +
+  scale_color_manual(name = "Sex", values = c("Female" = "red", "Male" = "blue")) +
+  scale_shape_manual(name = "Race", values = c(15, 16, 17, 18, 19, 8, 9)) + 
+  labs(x = NULL, y = "Age (yrs) at boost") + 
+  facet_grid(~ dataset) + 
+  theme_age
+```
+
+# <span style="font-size:24px;"> The availability across assay </span>
+```{r}
+# Adding subject meta data into ab data
+Ab_titer_baseline <- master_processed_data[["plasma_ab_titer"]]$batchCorrected_data %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column("specimen_id") %>%
+  merge(master_processed_data[["subject_specimen"]], by = 'specimen_id') %>%
+  dplyr::filter(timepoint == 0)
+
+# Adding subject meta data into RNAseq data
+RNAseq_baseline <- master_processed_data[["pbmc_gene_expression"]]$tpm$batchCorrected_data %>%
+  t() %>%
+  data.frame() %>%
+  mutate_all(~ log2(. + 1))  %>%
+  rownames_to_column("specimen_id") %>%
+  merge(master_processed_data[["subject_specimen"]], by = 'specimen_id') %>%
+  dplyr::filter(timepoint == 0)
+
+# Filter out gene by their variance
+# gene_variance <- apply(RNAseq_baseline %>% select(matches("^ENSG")) , 2, var, na.rm = TRUE)
+# top_genes <- names(sort(gene_variance, decreasing = TRUE))[1:2000]
+# 
+# RNAseq_baseline_filtered <- RNAseq_baseline %>%
+#   select("specimen_id", "subject_id", "dataset", "timepoint", "infancy_vac",
+#          "biological_sex", "date_of_boost", "race", "age", "age_at_boost", all_of(top_genes))
+
+# Adding subject meta data into cell frequency data
+Cell_Freq_baseline <- master_processed_data[["pbmc_cell_frequency"]]$batchCorrected_data %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column("specimen_id") %>%
+  merge(master_processed_data[["subject_specimen"]], by = 'specimen_id') %>%
+  dplyr::filter(timepoint == 0)
+
+# Adding subject meta data into cytokine olink data
+Cytokine_Olink_baseline <- master_processed_data[["plasma_cytokine_concentrations_by_olink"]]$batchCorrected_data %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column("specimen_id") %>%
+  merge(master_processed_data[["subject_specimen"]], by = 'specimen_id')  %>%
+  dplyr::filter(timepoint == 0)
+
+# Adding subject meta data into cytokine legendplex data
+Cytokine_LegendPlex_baseline <- master_processed_data[["plasma_cytokine_concentrations_by_legendplex"]]$normalized_data %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column("specimen_id") %>%
+  merge(master_processed_data[["subject_specimen"]], by = 'specimen_id') %>%
+  dplyr::filter(timepoint == 0)
+
+# Adding subject meta data into t_cell_polarization data
+T_Polarization_baseline <- master_processed_data[["t_cell_polarization"]]$raw_data %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column("specimen_id") %>%
+  merge(master_processed_data[["subject_specimen"]], by = 'specimen_id') %>%
+  dplyr::filter(timepoint == 0)
+
+# Adding subject meta data into t_cell_activation data
+T_Activation_baseline <- master_processed_data[["t_cell_activation"]]$raw_data %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column("specimen_id") %>%
+  merge(master_processed_data[["subject_specimen"]], by = 'specimen_id') %>%
+  dplyr::filter(timepoint == 0)
+
+# how many subjects in total
+n = length(unique(vctrs::vec_c(Ab_titer_baseline$subject_id, 
+                               RNAseq_baseline$subject_id,
+                               Cell_Freq_baseline$subject_id,
+                               Cytokine_Olink_baseline$subject_id,
+                               Cytokine_LegendPlex_baseline$subject_id,
+                               T_Polarization_baseline$subject_id,
+                               T_Activation_baseline$subject_id)))
+
+# check overlap
+overlap_check = data.frame(matrix(NA, ncol = 8, nrow = n))
+colnames(overlap_check) = c("subject", "Ab_titer", "RNAseq", "Cell_freq", "Olink", "LegendPlex", "T_polar", "T_act")
+overlap_check$subject = unique(vctrs::vec_c(unique(Ab_titer_baseline$subject_id), 
+                                            unique(RNAseq_baseline$subject_id),
+                                            unique(Cell_Freq_baseline$subject_id),
+                                            unique(Cytokine_Olink_baseline$subject_id),
+                                            unique(Cytokine_LegendPlex_baseline$subject_id),
+                                            unique(T_Polarization_baseline$subject_id),
+                                            unique(T_Activation_baseline$subject_id)))
+
+overlap_check[overlap_check$subject %in% unique(Ab_titer_baseline$subject_id),2] = 1
+overlap_check[overlap_check$subject %in% unique(RNAseq_baseline$subject_id),3] = 1
+overlap_check[overlap_check$subject %in% unique(Cell_Freq_baseline$subject_id),4] = 1
+overlap_check[overlap_check$subject %in% unique(Cytokine_Olink_baseline$subject_id),5] = 1
+overlap_check[overlap_check$subject %in% unique(Cytokine_LegendPlex_baseline$subject_id),6] = 1
+overlap_check[overlap_check$subject %in% unique(T_Polarization_baseline$subject_id),7] = 1
+overlap_check[overlap_check$subject %in% unique(T_Activation_baseline$subject_id),8] = 1
+overlap_check[is.na(overlap_check)] = 0
+
+# Prepare dataset annotation
+subject_dataset <- master_processed_data[["subject_specimen"]] %>%
+  select(subject_id, dataset) %>%
+  distinct() %>%
+  mutate(subject_id = as.character(subject_id))
+
+# Build assay availability matrix: subject (rows) x assays (columns)
+assay_matrix <- overlap_check %>%
+  column_to_rownames("subject") %>%
+  as.matrix()
+
+# Extract dataset vector matched to matrix rows
+subject_ids <- rownames(assay_matrix)
+dataset_vector <- subject_dataset$dataset[match(subject_ids, subject_dataset$subject_id)]
+names(dataset_vector) <- subject_ids
+
+# Optional: Order dataset levels
+dataset_vector <- factor(dataset_vector, levels = c("2020_dataset", "2021_dataset", "2022_dataset", "2023_dataset"))
+
+# Build ordering based on dataset
+subject_order <- order(dataset_vector, na.last = TRUE)
+assay_matrix_sorted <- assay_matrix[subject_order, ]
+dataset_vector_sorted <- dataset_vector[subject_order]
+
+# Define colors for dataset annotation
+dataset_colors <- c(
+  "2020_dataset" = "skyblue",
+  "2021_dataset" = "lightgreen",
+  "2022_dataset" = "orchid",
+  "2023_dataset" = "gold"
+)
+
+# Create row annotation for dataset
+left_anno <- rowAnnotation(
+  dataset = dataset_vector_sorted,
+  col = list(dataset = dataset_colors),
+  annotation_name_side = "top"
+)
+
+# Plot heatmap
+Heatmap(
+  matrix = assay_matrix_sorted,
+  name = "Assay Available",
+  col = c("0" = "white", "1" = "black"),
+  left_annotation = left_anno,
+  show_column_names = TRUE,
+  show_row_names = FALSE,
+  column_names_gp = gpar(fontsize = 8),
+  column_title = "Assays",
+  row_title = "Subjects (ordered by dataset)",
+  cluster_rows = FALSE,
+  cluster_columns = FALSE
+)
+
+# filter out if that subject only have one assay result
+subjects_with_one_assay = overlap_check %>%
+  mutate(sumVar = rowSums(.[2:8])) %>%
+  filter(sumVar == 1) %>%
+  pull(subject)
+
+subjects_with_all_assay = overlap_check %>%
+  mutate(sumVar = rowSums(.[2:8])) %>%
+  filter(sumVar == 6) %>%
+  pull(subject)
+
+cat("Subjects with only one assay:\n")
+print(subjects_with_one_assay)
+
+# # Reshape to long format
+# overlap_check_long <- melt(overlap_check, id.vars = "subject")
+# 
+# # Mark subjects with only one assay
+# overlap_check_long$highlight <- ifelse(overlap_check_long$subject %in% subjects_with_one_assay, "yes", "no")
+# 
+# overlap_check_long <- overlap_check_long %>%
+#   mutate(subject = as.character(subject)) %>%
+#   left_join(master_processed_data[["subject_specimen"]] %>%
+#               mutate(subject_id = as.character(subject_id)) %>%
+#               select(subject_id, dataset) %>%
+#               distinct(), 
+#             by = c("subject" = "subject_id"))
+# 
+# # Order features by number of 1s
+# feature_order <- overlap_check_long %>%
+#   group_by(variable) %>%
+#   summarise(count_1s = sum(value)) %>%
+#   arrange(desc(count_1s)) %>%
+#   pull(variable)
+# 
+# # Convert to factors with ordered levels
+# overlap_check_long$variable <- factor(overlap_check_long$variable, levels = feature_order)
+# overlap_check_long$subject <- factor(overlap_check_long$subject)
+# 
+# # Build custom labels: only show subjects with one assay, others are blank
+# subject_levels <- levels(overlap_check_long$subject)
+# subject_labels <- ifelse(subject_levels %in% subjects_with_one_assay, subject_levels, "")
+# 
+# # Plot
+# ggplot(overlap_check_long) +
+#   geom_tile(aes(x = subject, y = variable, fill = factor(value)), color = "grey50", width = 0.9) +
+#   scale_fill_manual(values = c("0" = "white", "1" = "black")) +
+#   scale_x_discrete(labels = subject_labels) +
+#   ggtitle("Assay Availability Across Subjects") +
+#   xlab("Subject ID") +
+#   ylab("Features") +
+#   cowplot::theme_map() +
+#   theme(
+#     plot.title = element_text(hjust = 0.5, size = 14),
+#     axis.title.x = element_text(size = 10),
+#     axis.title.y = element_text(size = 10),
+#     axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, colour = "red", size = 6),
+#     axis.text.y = element_text(size = 10),
+#     legend.position = "none"
+#   )
+```
+```{r}
+master_processed_data = readRDS(file = paste0(dir_RDS_objects, "master_processed_data_v20240825.RDS"))
+
+# Adding subject meta data into RNAseq data
+Ab_titer <- master_processed_data[["plasma_ab_titer"]]$batchCorrected_data %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column("specimen_id") %>%
+  merge(master_processed_data[["subject_specimen"]], by = 'specimen_id')
+
+# Adding subject meta data into RNAseq data
+RNAseq <- master_processed_data[["pbmc_gene_expression"]]$tpm$batchCorrected_data %>%
+  t() %>%
+  data.frame() %>%
+  mutate_all(~ log2(. + 1))  %>%
+  rownames_to_column("specimen_id") %>%
+  merge(master_processed_data[["subject_specimen"]], by = 'specimen_id')
+
+# Adding subject meta data into cell frequency data
+Cell_Freq <- master_processed_data[["pbmc_cell_frequency"]]$batchCorrected_data %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column("specimen_id") %>%
+  merge(master_processed_data[["subject_specimen"]], by = 'specimen_id')
+
+write.csv(Ab_titer, 
+          file = "/Users/jhou2/Documents/GitHub/PertussisVaccine_Prediction/data/output/Ab_titer.csv",
+          row.names = FALSE)
+
+write.csv(RNAseq, 
+          file = "/Users/jhou2/Documents/GitHub/PertussisVaccine_Prediction/data/output/RNAseq.csv",
+          row.names = FALSE)
+
+write.csv(Cell_Freq, 
+          file = "/Users/jhou2/Documents/GitHub/PertussisVaccine_Prediction/data/output/Cell_Freq.csv",
+          row.names = FALSE)
+```
+
+
+
