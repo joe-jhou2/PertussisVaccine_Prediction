@@ -329,6 +329,10 @@ Cell_Freq <- master_processed_data[["pbmc_cell_frequency"]]$batchCorrected_data 
   rownames_to_column("specimen_id") %>%
   merge(master_processed_data[["subject_specimen"]], by = 'specimen_id')
 
+write.csv(master_processed_data[["subject_specimen"]], 
+          file = "/Users/jhou2/Documents/GitHub/PertussisVaccine_Prediction/data/output/subject_specimen.csv",
+          row.names = FALSE)
+
 write.csv(Ab_titer, 
           file = "/Users/jhou2/Documents/GitHub/PertussisVaccine_Prediction/data/output/Ab_titer.csv",
           row.names = FALSE)
