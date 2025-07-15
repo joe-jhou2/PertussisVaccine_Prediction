@@ -23,7 +23,7 @@ dir_raw_challenge <- paste0(base_dir, "data/raw_datasets/challenge_dataset/")
 dir_RDS_output_objects <- paste0(base_dir, "data/output/")
 
 ## `codebase.R` installs required packages and all house keeping functions
-source(paste0(base_dir, "code/codebase.R"))
+source(paste0(base_dir, "scripts/codebase.R"))
 library(readr)
 library(dplyr)
 library(tidyr)

@@ -1,0 +1,148 @@
+---
+title: "MCIA"
+output: html_document
+date: "2025-07-14"
+---
+
+```{r load libraries}
+# load libraries
+library(omicade4)
+library(mogsa)
+library(devtools)
+library(RSpectra)
+library(corpcor)
+library(tidyverse)
+
+base_dir = "/Users/jhou2/Documents/GitHub/PertussisVaccine_Prediction/"
+source(paste0(base_dir, "scripts/codebase.R"))
+
+dir_RDS_objects <- paste0(base_dir, "data/output/")
+master_processed_data = readRDS(file = paste0(dir_RDS_objects, "master_processed_data_v20240825.RDS"))
+```
+
+```{r}
+# Adding subject meta data into ab data
+Ab_titer_baseline <- master_processed_data[["plasma_ab_titer"]]$batchCorrected_data %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column("specimen_id")
+
+# Adding subject meta data into RNAseq data
+RNAseq_baseline <- master_processed_data[["pbmc_gene_expression"]]$tpm$batchCorrected_data %>%
+  t() %>%
+  data.frame() %>%
+  mutate_all(~ log2(. + 1))  %>%
+  rownames_to_column("specimen_id")
+
+# Adding subject meta data into cell frequency data
+Cell_Freq_baseline <- master_processed_data[["pbmc_cell_frequency"]]$batchCorrected_data %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column("specimen_id")
+```
+
+```{r}
+# create a full join dataset that includes all modal datasets
+full_join_dataset <- Ab_titer_baseline %>% 
+  dplyr::full_join(RNAseq_baseline, by = 'specimen_id') %>%
+  dplyr::full_join(Cell_Freq_baseline,  by = 'specimen_id') %>%
+  merge(master_processed_data[["subject_specimen"]], by = 'specimen_id')
+
+# select day0 data for features, and day14 data for predict targets
+day0_df = full_join_dataset%>%
+  dplyr::filter(timepoint == 0 & ! dataset == '2023_dataset') %>%
+  dplyr::select(-c('specimen_id','timepoint', 'dataset', 'date_of_boost', 'race', 'age_at_boost'))
+
+Ab_titer_day14_df = full_join_dataset%>%
+  dplyr::filter(timepoint == 14 & ! dataset == '2023_dataset') %>%
+  dplyr::select(c('subject_id', 'IgG_PT')) %>%
+  dplyr::rename('IgG_PT_day14' = 'IgG_PT')
+
+Monocytes_day1_df = full_join_dataset%>%
+  dplyr::filter(timepoint == 1 & ! dataset == '2023_dataset') %>%
+  dplyr::select(c('subject_id', 'Monocytes')) %>%
+  dplyr::rename('Monocytes_day1' = 'Monocytes')
+
+CCL3_day3_df = full_join_dataset%>%
+  dplyr::filter(timepoint == 3 & ! dataset == '2023_dataset') %>%
+  dplyr::select(c('subject_id', 'ENSG00000277632.1')) %>%
+  dplyr::rename('CCL3_day3' = 'ENSG00000277632.1')
+
+# merge variables and targets as some targets values are missed, wouldn't be good
+# idea to impute y value. So just filter out samples if they have missed y values
+final_df <- day0_df %>%
+  dplyr::inner_join(Ab_titer_day14_df, by = 'subject_id') %>%
+  dplyr::inner_join(Monocytes_day1_df, by = 'subject_id') %>%
+  dplyr::inner_join(CCL3_day3_df, by = 'subject_id')
+
+# here aims to CCL3 expression value
+final_df <- final_df %>%
+  filter(!is.na(CCL3_day3))
+
+# impute missing values
+final_df_imputed <- final_df %>%
+  column_to_rownames("subject_id") %>%
+  dplyr::select(-c("infancy_vac", "biological_sex", "age", "IgG_PT_day14", "Monocytes_day1", "CCL3_day3")) %>%
+  as.matrix() %>%
+  impute.knn() %>%
+  .$data %>%
+  as.data.frame() %>%
+  rownames_to_column("subject_id") %>%
+  dplyr::full_join(
+      final_df %>%
+        mutate(subject_id = as.character(subject_id)) %>%
+        dplyr::select(subject_id, infancy_vac, biological_sex, age, IgG_PT_day14, Monocytes_day1, CCL3_day3),
+      by = "subject_id"
+  )
+
+```
+
+
+```{r}
+# split data from imputed data into each modal, prepare for later MCIA
+ab_day0 <- final_df_imputed %>%
+  dplyr::select(setdiff(colnames(Ab_titer_baseline), "specimen_id")) %>%
+  t()
+
+rnaseq_day0 <- final_df_imputed %>%
+  dplyr::select(setdiff(colnames(RNAseq_baseline), "specimen_id")) %>%
+  t()
+
+cellfreq_day0 <- final_df_imputed %>%
+  dplyr::select(setdiff(colnames(Cell_Freq_baseline), "specimen_id")) %>%
+  t()
+
+mcia_data <- list(ab=ab_day0, 
+                  cellfreq=cellfreq_day0,
+                  seq=rnaseq_day0)
+
+# Run MCIA method to integrate data
+set.seed(0)
+
+# The "globalScore" approach equals consensus PCA; 
+# The "blockScore" approach equals generalized canonical correlation analysis (GCCA); 
+# The "blockLoading" approach equals multiple co-inertia anaysis (MCIA);
+num_comps_list <- c(10, 15, 20, 30, 40, 50, 60)
+mcia_out <- lapply(num_comps_list, function(n) {
+  mcia_mbpca(mcia_data, num_comps = n, preprocess = 'nsc', block_prep = 'inertia', deflat_method = "blockLoading")
+})
+
+# Extract global scores
+gs <- lapply(mcia_out, function(out) new_gs(out$data_prep, out$mcia_result))
+names(gs) <- paste0("gs_comps", num_comps_list)
+
+# Add metadata, ensuring sample alignment
+metadata_cols <- c("infancy_vac", "biological_sex", "age", "IgG_PT_day14", "Monocytes_day1", "CCL3_day3")
+gs <- lapply(gs, function(df) {
+  df <- as.data.frame(df)
+  cbind(df, final_df[, metadata_cols])
+})
+
+# export to csv
+for (n in num_comps_list) {
+  write.csv(gs[[paste0("gs_comps", n)]],
+            file = paste0("/Users/jhou2/Documents/GitHub/PertussisVaccine_Prediction/data/output/gs_comps", n, ".csv"),
+            row.names = FALSE)
+}
+
+```
